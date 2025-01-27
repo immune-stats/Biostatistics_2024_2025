@@ -1,0 +1,346 @@
+---
+title: "Projekt_Biostatystyka"
+author: "Patrycja Kielan"
+date: '2025-01-07'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Loading required packages:
+
+```{r}
+library(dplyr)
+library(survival)
+library(survminer)
+library(mice)
+library(MASS)
+```
+
+Loading data:
+
+```{r}
+data <- read.csv("data_eziefula_etal.csv", header = T, stringsAsFactors = F)
+data
+```
+
+Verifying whether the data contains any missing values:
+
+```{r}
+na_count <- sapply(data, function(x) sum(is.na(x)))
+print(na_count)
+
+rows_with_na <- sum(apply(data, 1, function(row) any(is.na(row))))
+print(rows_with_na)
+```
+
+There are few missing values.
+
+In total, 15 rows out of 372 contain at least one missing value.
+
+```{r}
+data[is.na(data$treatment), ]
+```
+
+Notably, rows 48 and 106 are missing all information except for rs1050828 and rs1050829.
+
+# 1. Descriptive analysis
+
+```{r}
+head(data)
+```
+
+```{r}
+summary(data)
+```
+
+```{r}
+for (i in 1:8){
+  if (is.numeric(data[,i])){
+    print(i)
+    hist(data[,i], main = paste("Histogram of", names(data)[i]), xlab = names(data)[i], col = "skyblue", breaks = 20)
+  }
+}
+```
+
+The distribution of hb_d0 and hb_d7 variables looks similar to Gauss curve. Verifying with Shapiro-Wilk test, whether those variables have normal distribution.
+
+```{r}
+print(shapiro.test(data$hb_d0))
+print(shapiro.test(data$hb_d7))
+```
+
+The result implies that real distribution of variable hb_d0 is not normal, while it cannot be ruled out in case of hb_d7.
+
+Conclusions about 
+
+Treatment - indicates the size of primaquine dose used in treatment. In this dataset, this variable takes only four values: 0, 0.1, 0.4 and 0.75
+
+Age - discrete variable, taking natural values (full years). Youngest patient is 1 year old, while the oldest patient is 10. The age distribution is roughly even.
+
+Gender - The distribution is roughly even, however there are are slightly less girls (2) than boys (1).
+
+rs1050828 - genetic marker (more information below)
+
+rs1050829 - genetic marker (more information below)
+
+pf_d0 - parasite density on day 0. The distribution is very skewed - while the first quantile equals 5532 p/ml and the median equals 30352 p/ml, several patients had over 500 thousand.
+
+hb_d0 - hemoglobin concentration on day 0. The distribution curve seems similar to Gauss curve, but it is not exactly symmetrical - there are more values in its left tail. Shapiro-Wilk Test further confirms that the distribution is not exactly normal.
+
+hb_d7 - hemoglobin concentration on day 7. The distribution retains similar shape to hb_d0, but both mean and median have slightly decreased.
+
+# Data imputation
+
+Imputing missing values with MICE:
+
+```{r}
+data2 <- mice(data, m = 5, method = "pmm", seed = 42)
+data <- complete(data2, 1)
+```
+
+Dropping rows 48 and 106, as most of the data in there is imputed 
+and of dubious credibility.
+
+```{r}
+data <- data[-c(48, 106),]
+data
+```
+
+#2. Information retrieval
+
+Source of data: http://www.ensembl.org/Homo_sapiens/Variation/Explore?r=X:154535502-154536502;v=rs1050828;vdb=variation;vf=1109736568
+
+rs1050828 is a gene located in Chromosome X (so the boys will have one copy and girls will have two), in its forward strand. Its alleles are C and T, with C being the ancestral allele (common ancestor's allele). C also represents 96% of alleles worldwide. None of European or East Asian participants of the 1000 Genomes Project had any T allele, while Africans were the population where the T allele occurs most often (13%).
+
+Out of 127 cases of T allele occurence in Africans identified by 1000 Genomes Project, 78 constituted a C|T pair, 41 were a lone T allele, and 8 were a T|T pair.
+
+rs1050829 is also located in the forward strand of Chromosome X. Its alleles are A, C and T. The ancestral allele is T. T represents 90% of alleles worldwide, while A is extremely rare (about 0.003% of cases, mostly in Americas). C allele occurs most often in Africans (34%), while it is the rarest among Europeans and Asians.
+
+Out of 299 cases of C allele occurence in Africans identified by 1000 Genomes Project, 155 constituted a C|T pair, 104 were a lone C allele, and 40 were a C|C pair.
+
+We shall assume that in this research, gender equals sex. Boys, having just one X chromosome, actually only have one allele, which has been doubled in this dataset (into "CC" or "TT") and will have to be accounted for in later steps. There is no fear of wrong imputation here, as the only two rows containing missing value in gender column have been dropped due to dubious credibility and there were no missing values in genetic marker columns.
+
+Verifying whether there are any boys with two different alleles, which would indicate a data error:
+
+```{r}
+print('Rows with errors in first marker: ')
+print(which(data[data$gender==1,]$rs1050828 == 'TC'))
+
+print('Rows with errors in second marker: ')
+print(which(data[data$gender==1,]$rs1050829 == 'TC'))
+```
+First row contains a boy who, according to the study, has two different copies of the gene rs1050829, which indicates having two different X chromosomes. Due to insufficient data, we cannot tell whether that is a mistake in gender assignment or a mistake in chromosome research. We believe the latter is more likely, however in this case we have no way of telling which allele this person actually has. Therefore, and given that there is only one such case, we have decided to drop this row to preserve data integrity.
+
+```{r}
+data <- data[-c(1),]
+data
+```
+
+#3. Distribution by gender
+
+The code below will return the amount of each allele in each gene under the assumption that all people with gender == 1 have only one allele written twice.
+
+```{r}
+
+data$rs8C <- sapply(data$rs1050828, function(x) stringr::str_count(x, "C"))
+data$rs8T <- sapply(data$rs1050828, function(x) stringr::str_count(x, "T"))
+data$rs9C <- sapply(data$rs1050829, function(x) stringr::str_count(x, "C"))
+data$rs9T <- sapply(data$rs1050829, function(x) stringr::str_count(x, "T"))
+
+data$rs8C <- ifelse(data$gender==1, data$rs8C / 2, data$rs8C)
+data$rs8T <- ifelse(data$gender==1, data$rs8T / 2, data$rs8T)
+data$rs9C <- ifelse(data$gender==1, data$rs9C / 2, data$rs9C)
+data$rs9T <- ifelse(data$gender==1, data$rs9T / 2, data$rs9T)
+
+```
+
+Retrieving data for gene rs1050828:
+
+```{r}
+ag8 <- aggregate(cbind(rs8C, rs8T) ~ gender, data = data, sum) 
+ag8
+```
+
+Retrieving data for gene rs1050829:
+
+```{r}
+ag9 <- aggregate(cbind(rs9C, rs9T) ~ gender, data = data, sum)
+ag9
+```
+
+## Evaluation of differences
+
+```{r}
+chisq.test(ag8[2:3])
+```
+
+```{r}
+chisq.test(ag9[2:3])
+```
+
+In both cases, p-value is well above standard threshold of 0.05. 
+This indicates that available data does not provide enough support
+for the hypothesis that there is a significant difference in allele distribution
+between boys and girls.
+
+# 4. Genotype distribution in girls
+
+```{r}
+table(data[data$gender==2,]$rs1050828)
+```
+
+```{r}
+table(data[data$gender==2,]$rs1050829)
+```
+
+Testing the Hardy-Weinberg equilibrium for rs1050828:
+
+```{r}
+pihat8 <- (2*(137+47))/(2*(137+47+0))
+pihat8
+```
+
+```{r}
+HardyW8 <- c((pihat8)^2, 2*pihat8*(1-pihat8), (1-pihat8)^2)
+HardyW8
+```
+
+The data is obviously not agreeing with the equilibrium - there is a sizable portion of TC variants but no TT.
+Proving it with statistical test:
+
+```{r}
+chisq.test(x=c(137, 47), p=c(1,0))
+```
+
+P-value of < 2.2e-16 proves that observed genotype distribution of marker rs1050828 does not agree with the expectations from the Hardy-Weinberg Equilibrium.
+
+Repeating the steps above for the second marker:
+
+```{r}
+pihat9 <- (2*(81+84))/(2*(81+84+19))
+pihat9
+```
+
+```{r}
+HardyW9 <- c((pihat9)^2, 2*pihat9*(1-pihat9), (1-pihat9)^2)
+HardyW9
+```
+
+```{r}
+chisq.test(x=c(81, 84, 19), p=HardyW9)
+```
+
+Equally low p-value suggests that marker rs1050828does not agree with the expectations from the Hardy-Weinberg Equilibrium either. In this case, there are more TC and CC variants than expected.
+
+#5. Linear regression for Hb_d0
+
+Creating a linear regression model that explains the variability of "Hb_d0" based on genetic markers, gender, parasite density at day 0 and age.
+
+
+```{r}
+model_hb_d0 <- lm(hb_d0 ~ rs1050828 + rs1050829 + gender + pf_d0 + age, data = data)
+summary(model_hb_d0)
+```
+
+The model suggests, that the genetic markers rs1050828 and rs1050829 do not significantly affect the hemoglobin concentration on day 0, when adjusting for gender, parasite density and age. In particular, age is considered a very significant variable. The p-value of this model is much lower than the standard 0.05 threshold, and the coefficient of determination (R²) is 0.2585. It suggests that age does explain large part of hemoglobin concentration on day 0, but even more remains unexplained (e.g. it depends on other parameters, not included in the model). Meanwhile, genetic markers  rs1050828 and rs1050829 can be considered irrelevant, when it comes to variability of hemoglobin concentration on day 0.
+
+```{r}
+summary(lm(hb_d0 ~ age, data = data))
+```
+
+Model with age as only variable has R² of 0.2342, only slightly lower than 
+the model discussed before. 
+
+Residual analysis:
+
+```{r}
+residuals_hb_d0 <- residuals(model_hb_d0)
+plot(residuals(model_hb_d0), main = 'Plot of residuals', xlab='Index', ylab='Value')
+```
+
+This plot does not imply any issues with the residuals. Let's confirm this finding with Shapiro-Wilk normality test.
+
+```{r}
+shapiro_test_hb_d0 <- shapiro.test(residuals_hb_d0)
+shapiro_test_hb_d0
+```
+
+The p-value is 0.5308, so there is no basis for rejecting the null hypothesis of the normality of the residual distribution. In this case, the Box-Cox transformation is not necessary.
+
+```{r}
+ggplot(data.frame(residuals_hb_d0), aes(sample = residuals_hb_d0, color = "red")) +
+  stat_qq() +
+  stat_qq_line() +
+  ggtitle(paste("QQ Plot for Residuals"))
+```
+
+Based on the QQ plot, it can be concluded that the distribution of the model's residuals aligns well with the theoretical normal distribution line. The points in the central part of the plot lie along the QQ line, suggesting that the residuals in this part of the distribution conform to the normality assumption. The only issue are some slight deviations from the ideal fit at the tails of the plot (the extremes of the distribution). Nevertheless, those deviations seem small enough to consider the model good.
+
+#6. Linear regression for Hb_d7
+
+Create a linear regression model using “hb_d7” as the outcome variable, but this time also adjusting for the genetic effects of genetic markers for sex, parasite load at enrollment, age, and PQ dose.
+
+```{r}
+model_hb_d7 <- lm(hb_d7 ~ rs1050828 + rs1050829 + gender + pf_d0 + age + treatment, data = data)
+summary(model_hb_d7)
+```
+
+R-squared (R²) is 0.2586, which means that the model explains 25.86% of the variability of the dependent variable hb_d7.
+F-statistic is 15.7 with p-value < 2.2e-16, which means that the model as a whole is statistically significant. The model indicates a significant effect of variables pf_d0 and age on hb_d7. Other variables, genetic markers, gender, parasite load at enrollment and treatment, do not have a statistically significant effect. The explained variability (R²) is moderate, which suggests that there are additional factors that can affect hemoglobin, but are not included in the model.
+
+```{r}
+residuals_hb_d7 <- residuals(model_hb_d7)
+shapiro_test_hb_d7 <- shapiro.test(residuals_hb_d7)
+shapiro_test_hb_d7
+```
+
+The p-value is 0.1828, so in this case there also is no basis for rejecting the null hypothesis of the normality of the residual distribution. 
+
+```{r}
+residuals_hb_d7 <- residuals(model_hb_d7)
+plot(residuals(model_hb_d7), main = 'Plot of residuals', xlab='Index', ylab='Value')
+```
+
+```{r}
+ggplot(data.frame(residuals_hb_d7), aes(sample = residuals_hb_d7, color = "red")) +
+  stat_qq() +
+  stat_qq_line() +
+  ggtitle(paste("QQ Plot for Residuals"))
+```
+
+While the residuals are normal, the fit of this model is not as great, with more deviation at the ends.
+
+# Performing a Box-Cox transformation
+
+```{r}
+boxcox_result <- boxcox(model_hb_d7, lambda = seq(-2, 2, by = 0.1))
+```
+
+```{r}
+optimal_lambda <- boxcox_result$x[which.max(boxcox_result$y)]
+optimal_lambda
+```
+
+```{r}
+# Transforming the dependent variable hb_d0
+data$hb_d7_transformed <- (data$hb_d7^optimal_lambda - 1) / optimal_lambda
+
+# Fitting new model with transformed dependent variable
+model_hb_d7_transformed <- lm(hb_d7_transformed ~ rs1050828 + rs1050829 + gender + pf_d0 + age + treatment, data = data)
+summary(model_hb_d7_transformed)
+
+residuals_hb_d7_transformed <- residuals(model_hb_d7_transformed)
+
+# QQ plot for new residuals
+ggplot(data.frame(residuals_hb_d7_transformed), aes(sample = residuals_hb_d7_transformed, color = "blue")) +
+  stat_qq() +
+  stat_qq_line() +
+  ggtitle("QQ Plot for Transformed Residuals")
+
+# Shapiro-Wilk Test for transformed residuals
+shapiro_test_hb_d7_transformed <- shapiro.test(residuals_hb_d7_transformed)
+shapiro_test_hb_d7_transformed
+```
